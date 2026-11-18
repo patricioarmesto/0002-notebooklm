@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
+from answer import answer_question
 from upload import ingest
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://notebooklm:notebooklm@localhost:5432/notebooklm")
@@ -151,5 +152,14 @@ async def upload_document(file: UploadFile = File(...), title: str = Form("")):
     name = title.strip() or (file.filename or "documento").rsplit(".", 1)[0]
     return StreamingResponse(
         ingest(file, name, app.state.qdrant, app.state.pool, app.state.documents),
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/api/ask")
+async def ask(payload: dict):
+    question = payload.get("question", "")
+    return StreamingResponse(
+        answer_question(question, app.state.qdrant, app.state.pool, app.state.documents, app.state.llm_model),
         media_type="text/event-stream",
     )
