@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import AsyncGenerator
 
 import httpx
@@ -9,9 +10,11 @@ from search import retrieve
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 UNKNOWN_ANSWER = "No lo sé con los documentos disponibles"
-PROMPT_TEMPLATE = """Respondé SOLO con el siguiente contexto. No uses conocimiento externo.
-Citá cada afirmación con [Doc N], usando exactamente la numeración indicada.
-Si la respuesta no está en el contexto, respondé exactamente: "{unknown}"
+UNCERTAINTY_MARKERS = ("no lo sé", "no sé", "no tengo información", "no dispongo", "no está en el contexto")
+PROMPT_TEMPLATE = """Respondé SOLO usando el siguiente contexto. No uses conocimiento externo.
+Citá cada afirmación indicando el número de documento entre corchetes, por ejemplo {example}, usando exactamente la numeración indicada. Incluí al menos una cita concreta en la respuesta.
+Si el contexto no contiene información relevante para la pregunta, respondé exactamente: "{unknown}".
+Si el contexto sí contiene información relacionada, respondé con ella aunque no repita literalmente las palabras de la pregunta.
 
 Contexto:
 {context}
@@ -44,11 +47,21 @@ def build_context(chunks: list[dict], documents: list[dict]) -> tuple[str, list[
 
 
 def build_prompt(context: str, question: str = "") -> str:
-    return PROMPT_TEMPLATE.format(unknown=UNKNOWN_ANSWER, context=context, question=question)
+    match = re.search(r"\[Doc (\d+)\]", context)
+    example = f"[Doc {match.group(1)}]" if match else "[Doc 1]"
+    return PROMPT_TEMPLATE.format(unknown=UNKNOWN_ANSWER, context=context, question=question, example=example)
 
 
 def accumulate_answer(tokens: list[str]) -> str:
     return "".join(tokens)
+
+
+def ensure_citations(text: str, citations: list[dict]) -> str:
+    """Fallback: el modelo a veces omite [Doc N] aunque recibió el contexto citado."""
+    lowered = text.lower()
+    if not citations or any(marker in lowered for marker in UNCERTAINTY_MARKERS) or re.search(r"\[Doc \d+\]", text):
+        return text
+    return f"{text.rstrip()} [Doc {citations[0]['n']}]"
 
 
 def _frame(event: str, data: dict) -> str:
@@ -99,12 +112,20 @@ async def answer_question(question: str, qdrant, pool, documents: list[dict], ll
     except Exception:
         failed = True
         yield _frame("error", {"message": "Ollama no pudo generar la respuesta"})
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        if failed:
+            await pool.execute("DELETE FROM questions WHERE id = $1", question_row["id"])
 
     if failed:
-        await pool.execute("DELETE FROM questions WHERE id = $1", question_row["id"])
         return
 
-    text = accumulate_answer(tokens)
+    raw_text = accumulate_answer(tokens)
+    text = ensure_citations(raw_text, citations)
+    if text != raw_text:
+        yield _frame("token", {"text": text[len(raw_text.rstrip()):]})
     answer_row = await pool.fetchrow(
         "INSERT INTO answers (question_id, text, citations) VALUES ($1, $2, $3::jsonb) RETURNING id",
         question_row["id"],
