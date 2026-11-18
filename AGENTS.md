@@ -4,7 +4,8 @@
 
 - `docs/decisiones.md` es el spec aprobado. Leelo antes de cambiar comportamiento y respetá sus decisiones y exclusiones.
 - `docs/superpowers/plans/2026-11-18-notebooklm-prototype.md` registra el plan ejecutado y las interfaces entre módulos.
-- Para arranque, puertos y verificación manual, seguí `README.md`: es la fuente de verdad, no la dupliques acá.
+- `README.md` describe la arquitectura y el alcance, y es la fuente de verdad para arranque, puertos y verificación manual; consultalo antes de agregar servicios o cambiar el arranque.
+- `docs/adr/` guarda cada decisión con sus alternativas descartadas; leelos antes de revertir una decisión o proponer una alternativa ya evaluada.
 
 ## Convenciones
 
