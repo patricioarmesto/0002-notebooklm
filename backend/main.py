@@ -1,3 +1,9 @@
+"""API FastAPI del prototipo: subida, preguntas y healthchecks.
+
+El frontend y el servicio de semillas usan siempre estos endpoints HTTP;
+la lógica RAG vive en `upload.py`, `search.py` y `answer.py`.
+"""
+
 import asyncio
 import os
 from contextlib import asynccontextmanager
@@ -13,6 +19,8 @@ from qdrant_client.models import Distance, VectorParams
 import upload
 from answer import answer_question
 
+# En local apuntan a localhost; dentro de Compose se overridean con los
+# nombres de servicio (postgres, qdrant, ollama).
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://notebooklm:notebooklm@localhost:5432/notebooklm")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -21,6 +29,8 @@ EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "notebooklm_chunks")
 VECTOR_SIZE = 768
 
+# Esquema mínimo aplicado al arrancar: en un prototipo evita tener un
+# paso de migraciones separado. `documents` define la numeración [Doc N].
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
     id SERIAL PRIMARY KEY,
@@ -46,6 +56,7 @@ CREATE TABLE IF NOT EXISTS answers (
 
 
 async def _connect_with_retry():
+    """Espera hasta 60 s a que Postgres acepte conexiones."""
     for attempt in range(60):
         try:
             return await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
@@ -62,6 +73,10 @@ async def httpx_get(url, timeout):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Arranque: crea esquema y colección, y cachea los documentos en memoria.
+    Así no hay que leer Postgres en cada pedido; `app.state` es el lugar
+    compartido donde los endpoints encuentran sus dependencias.
+    """
     pool = await _connect_with_retry()
     async with pool.acquire() as conn:
         await conn.execute(SCHEMA)
@@ -83,6 +98,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NotebookLM local", lifespan=lifespan)
+# Abierto porque corre en la propia máquina; en producción se limitaría
+# a los orígenes del frontend.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -94,11 +111,16 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
+    """Solo dice que el proceso vive: lo usa el healthcheck de Compose."""
     return {"ok": True}
 
 
 @app.get("/api/ready")
 async def ready():
+    """Chequea dependencias reales: BD, Qdrant y los dos modelos de Ollama.
+    El frontend espera este endpoint; `/health` no alcanza porque el backend
+    puede estar vivo mientras los modelos todavía se descargan.
+    """
     missing = []
     try:
         await app.state.pool.fetchval("SELECT 1")
@@ -130,6 +152,7 @@ def documents():
 
 @app.get("/api/chunks/{chunk_id}")
 def chunk(chunk_id: str):
+    """Devuelve el texto original detrás de una cita [Doc N] clicable."""
     points = app.state.qdrant.retrieve(
         collection_name=COLLECTION_NAME,
         ids=[chunk_id],
@@ -150,6 +173,8 @@ def chunk(chunk_id: str):
 @app.post("/api/upload")
 async def upload_document(file: UploadFile = File(...), title: str = Form("")):
     filename = file.filename or "documento.txt"
+    # Leemos los bytes ACA, dentro del request: el generador SSE corre después
+    # de cerrado el UploadFile y ya no podría leerlo.
     content = await file.read()
     try:
         chunks = upload.validate_upload(filename, content)
@@ -164,6 +189,7 @@ async def upload_document(file: UploadFile = File(...), title: str = Form("")):
 
 @app.post("/api/ask")
 async def ask(payload: dict):
+    """Valida antes de abrir el stream: pregunta vacía es 400, no 200 + SSE."""
     question = payload.get("question", "")
     if not question.strip():
         raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía")

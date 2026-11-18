@@ -1,3 +1,7 @@
+# Stack completa del ejercicio en un solo `docker compose up`.
+# Orden real: infraestructura -> modelos -> backend -> semillas -> frontend.
+# Los servicios one-shot terminan con éxito y liberan a los que dependen
+# de ellos mediante `service_completed_successfully`.
 services:
   postgres:
     image: postgres:16-alpine
@@ -6,6 +10,7 @@ services:
       POSTGRES_USER: notebooklm
       POSTGRES_PASSWORD: notebooklm
     ports:
+      # Host 5433 / contenedor 5432: en este host 5432 ya está ocupado.
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -15,6 +20,7 @@ services:
       timeout: 3s
       retries: 30
 
+  # Base vectorial: guarda los chunks y sus vectores en un volumen persistente.
   qdrant:
     image: qdrant/qdrant:v1.12.1
     ports:
@@ -22,6 +28,7 @@ services:
     volumes:
       - qdrantdata:/qdrant/storage
 
+  # Modelos locales, sin APIs pagas. El volumen evita re-descargarlos.
   ollama:
     image: ollama/ollama:latest
     ports:
@@ -34,6 +41,8 @@ services:
       timeout: 5s
       retries: 30
 
+  # one-shot: descarga embedding + LLM y termina. `command` es un array para
+  # que el `&&` corra en el shell; un bloque YAML `>` lo truncaba.
   model-pull:
     image: ollama/ollama:latest
     environment:
@@ -45,6 +54,7 @@ services:
     command: ["ollama pull nomic-embed-text && ollama pull llama3.2:3b"]
     restart: "no"
 
+  # Espera a Postgres sano, a Qdrant y a que model-pull haya terminado.
   backend:
     build: ./backend
     ports:
@@ -69,6 +79,8 @@ services:
       timeout: 3s
       retries: 30
 
+  # Sube las 3 semillas por el endpoint REAL de upload, no por código interno:
+  # así se ejercita la misma ruta que usa el usuario.
   seed-docs:
     image: curlimages/curl:8.10.1
     volumes:
@@ -81,6 +93,8 @@ services:
       - |
         for f in /seed/*.txt; do
           echo "Seeding $$f"
+          # --fail convierte un HTTP 400/422 en error del contenedor: sin esto, un
+          # seed fallido dejaría la app 'verde' con menos documentos.
           curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 2 \
             -F "file=@$$f;type=text/plain" \
             -F "title=$$(basename $$f .txt)" \
@@ -88,9 +102,12 @@ services:
         done
     restart: "no"
 
+  # Arranca recién después de las semillas para mostrar documentos desde
+  # el primer render.
   frontend:
     build: ./frontend
     ports:
+      # Host 5174 / contenedor 5173: 5173 está ocupado por otro proyecto.
       - "${FRONTEND_PORT:-5174}:5173"
     environment:
       VITE_API_URL: http://localhost:8000

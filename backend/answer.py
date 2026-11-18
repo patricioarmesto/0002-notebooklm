@@ -1,3 +1,10 @@
+"""Generación de respuestas citadas solo desde el contexto recuperado (RAG).
+
+El modelo no usa conocimiento externo: recibe los 4 chunks más parecidos
+a la pregunta con sus números de documento y debe citarlos. Todo sale por
+SSE para mostrar tokens y citas mientras se generan.
+"""
+
 import json
 import os
 import re
@@ -9,8 +16,13 @@ from search import retrieve
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
+# Cuando el contexto no alcanza, esta frase exacta evita que el prototipo
+# invente datos sobre preguntas que salen de los documentos.
 UNKNOWN_ANSWER = "No lo sé con los documentos disponibles"
 UNCERTAINTY_MARKERS = ("no lo sé", "no sé", "no tengo información", "no dispongo", "no está en el contexto")
+# El ejemplo de cita se inyecta con un número REAL del contexto (ver
+# build_prompt). Un placeholder literal '[Doc N]' hacía que el modelo lo
+# copiara textualmente en la respuesta.
 PROMPT_TEMPLATE = """Respondé SOLO usando el siguiente contexto. No uses conocimiento externo.
 Citá cada afirmación indicando el número de documento entre corchetes, por ejemplo {example}, usando exactamente la numeración indicada. Incluí al menos una cita concreta en la respuesta.
 Si el contexto no contiene información relevante para la pregunta, respondé exactamente: "{unknown}".
@@ -25,6 +37,10 @@ Respuesta:"""
 
 
 def build_context(chunks: list[dict], documents: list[dict]) -> tuple[str, list[dict]]:
+    """Numera documentos por id y arma el contexto junto con sus citas.
+    Cada bloque lleva [Doc N], página e índice: el modelo cita con ese número
+    y el frontend usa la misma lista para volverlo clicable.
+    """
     number_by_id = {doc["id"]: index + 1 for index, doc in enumerate(sorted(documents, key=lambda d: d["id"]))}
     lines = []
     citations = []
@@ -47,6 +63,7 @@ def build_context(chunks: list[dict], documents: list[dict]) -> tuple[str, list[
 
 
 def build_prompt(context: str, question: str = "") -> str:
+    """Toma un [Doc N] del propio contexto como ejemplo concreto de cita."""
     match = re.search(r"\[Doc (\d+)\]", context)
     example = f"[Doc {match.group(1)}]" if match else "[Doc 1]"
     return PROMPT_TEMPLATE.format(unknown=UNKNOWN_ANSWER, context=context, question=question, example=example)
@@ -58,6 +75,8 @@ def accumulate_answer(tokens: list[str]) -> str:
 
 def ensure_citations(text: str, citations: list[dict]) -> str:
     """Fallback: el modelo a veces omite [Doc N] aunque recibió el contexto citado."""
+    # Solamente agregamos la cita principal si la respuesta afirma algo; si
+    # contiene dudas, inventar una fuente sería peor que no citar.
     lowered = text.lower()
     if not citations or any(marker in lowered for marker in UNCERTAINTY_MARKERS) or re.search(r"\[Doc \d+\]", text):
         return text
@@ -69,6 +88,10 @@ def _frame(event: str, data: dict) -> str:
 
 
 async def answer_question(question: str, qdrant, pool, documents: list[dict], llm_model: str) -> AsyncGenerator[str, None]:
+    """Orden del stream: citations -> token... -> done.
+    Las citas van primero para que la UI convierta los [Doc N] en botones
+    apenas empiezan a llegar los tokens.
+    """
     if not question.strip():
         yield _frame("error", {"message": "La pregunta no puede estar vacía"})
         return
@@ -76,6 +99,7 @@ async def answer_question(question: str, qdrant, pool, documents: list[dict], ll
         yield _frame("error", {"message": "No hay documentos indexados"})
         return
 
+    # Recuperación: los 4 chunks más cercanos en significado a la pregunta.
     chunks = await retrieve(question, qdrant, limit=4)
     if not chunks:
         yield _frame("error", {"message": "No hay documentos indexados"})
@@ -84,6 +108,8 @@ async def answer_question(question: str, qdrant, pool, documents: list[dict], ll
     context, citations = build_context(chunks, documents)
     yield _frame("citations", {"citations": citations})
 
+    # Se guarda la pregunta antes de generar; si Ollama falla se borra en el
+    # `finally` para no dejar filas huérfanas.
     question_row = await pool.fetchrow("INSERT INTO questions (text) VALUES ($1) RETURNING id", question)
     tokens = []
     failed = False
@@ -102,6 +128,7 @@ async def answer_question(question: str, qdrant, pool, documents: list[dict], ll
                 async for line in response.aiter_lines():
                     if not line.strip():
                         continue
+                    # Ollama manda una línea JSON por token; la reenviamos de inmediato.
                     payload = json.loads(line)
                     token = payload.get("response", "")
                     if token:
@@ -126,6 +153,7 @@ async def answer_question(question: str, qdrant, pool, documents: list[dict], ll
     text = ensure_citations(raw_text, citations)
     if text != raw_text:
         yield _frame("token", {"text": text[len(raw_text.rstrip()):]})
+    # Persistencia recién al final, con el texto definitivo y el JSON de citas.
     answer_row = await pool.fetchrow(
         "INSERT INTO answers (question_id, text, citations) VALUES ($1, $2, $3::jsonb) RETURNING id",
         question_row["id"],

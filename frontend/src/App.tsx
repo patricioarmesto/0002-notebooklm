@@ -1,3 +1,5 @@
+// Cliente del ejercicio: consume la API por HTTP/SSE. Toda la lógica RAG
+// está en el backend; acá solo se muestran documentos, progreso y citas.
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 const API = ((import.meta as any).env?.VITE_API_URL as string) || 'http://localhost:8000'
@@ -7,6 +9,11 @@ export type Citation = { n: number; doc_id: number; chunk_id: string; doc_title:
 export type Chunk = { text: string; doc_title: string; doc_id: number; page: number; chunk_index: number }
 type Token = { kind: 'text' | 'citation'; value: string }
 
+/**
+ * Convierte los [Doc N] de la respuesta en tokens clicables.
+ * Los números que no están en `known` quedan como texto: no queremos
+ * botones que no puedan abrir un chunk real.
+ */
 export function splitAnswerText(text: string, known: number[] = []): Token[] {
   const result: Token[] = []
   const regex = /\[Doc (\d+)\]/g
@@ -23,6 +30,11 @@ export function splitAnswerText(text: string, known: number[] = []): Token[] {
   return result
 }
 
+/**
+ * Lee el stream SSE del backend evento por evento.
+ * El buffer es clave: la red puede cortar un evento a mitad de un chunk,
+ * así que solo procesamos cuando aparece la línea en blanco que lo cierra.
+ */
 export async function* parseSSE(response: Response): AsyncGenerator<{ event: string; data: any }> {
   const reader = response.body!.getReader()
   const decoder = new TextDecoder()
@@ -63,6 +75,7 @@ export default function App() {
     if (response.ok) setDocs(await response.json())
   }, [])
 
+  // `/api/ready` puede fallar mientras se descargan los modelos: reintentamos.
   useEffect(() => {
     let alive = true
     const check = async () => {
@@ -79,6 +92,7 @@ export default function App() {
     return () => { alive = false; clearInterval(timer) }
   }, [loadDocs])
 
+  // La barra de progreso viene de los eventos `progress` del propio upload.
   const onUpload = async (file: File) => {
     setError('')
     setUploadProgress({ processed: 0, total: 0 })
@@ -110,6 +124,7 @@ export default function App() {
       })
       if (!response.ok) { setError('No se pudo hacer la pregunta'); return }
       for await (const event of parseSSE(response)) {
+        // `citations` llega primero; `token` se acumula y `done` fija el texto final.
         if (event.event === 'citations') setCitations(event.data.citations)
         if (event.event === 'token') setAnswer((previous) => previous + event.data.text)
         if (event.event === 'error') setError(event.data.message)
@@ -122,6 +137,7 @@ export default function App() {
     }
   }
 
+  // El botón [Doc N] no guarda el texto: lo busca en Qdrant vía el backend.
   const openCitation = async (n: string) => {
     const citation = citations.find((c) => String(c.n) === n)
     if (!citation) return

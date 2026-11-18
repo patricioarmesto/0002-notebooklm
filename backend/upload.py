@@ -1,3 +1,10 @@
+"""Pipeline de ingesta: PDF/TXT -> texto -> chunks -> vectores -> Qdrant.
+
+Este es el corazón del ejercicio: los documentos no se "suben al modelo",
+se dividen en fragmentos pequeños guardados con su vector. Después la
+pregunta se compara contra esos fragmentos, no contra el archivo completo.
+"""
+
 import io
 import json
 import os
@@ -7,6 +14,9 @@ from pypdf import PdfReader
 
 from search import embed, point_id
 
+# Fragmentos de 500 caracteres con 50 de solapamiento: los muy grandes
+# diluyen la búsqueda y los muy chicos pierden contexto; el overlap evita
+# cortar una idea justo en el borde entre dos chunks.
 CHUNK_SIZE = 500
 OVERLAP = 50
 MAX_BYTES = 10 * 1024 * 1024
@@ -14,10 +24,15 @@ COLLECTION_NAME = os.getenv("COLLECTION_NAME", "notebooklm_chunks")
 
 
 def document_key(title: str) -> str:
+    """Normaliza el título: "Bitly.txt" y "  bitly " son el mismo documento."""
     return " ".join(title.strip().lower().split())
 
 
 def extract_text(filename: str, content: bytes) -> list[tuple[str, int]]:
+    """Devuelve (texto, número de página) por cada página con texto.
+    La página se guarda en el payload: la cita dice de dónde viene y el modal
+    del frontend puede mostrar el fragmento original.
+    """
     if filename.lower().endswith(".txt"):
         return [(content.decode("utf-8", errors="replace"), 1)]
     if filename.lower().endswith(".pdf"):
@@ -34,6 +49,7 @@ def extract_text(filename: str, content: bytes) -> list[tuple[str, int]]:
 
 
 def chunk_text(text: str, page: int) -> list[dict]:
+    """Ventana deslizante: avanza CHUNK_SIZE - OVERLAP en cada pasada."""
     chunks = []
     start = 0
     index = 0
@@ -50,10 +66,12 @@ def chunk_text(text: str, page: int) -> list[dict]:
 
 
 def _frame(event: str, data: dict) -> str:
+    """Un evento SSE: línea `event`, línea `data` y línea en blanco de cierre."""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 class UploadValidationError(Exception):
+    """Lleva el código HTTP porque la validación ocurre antes del streaming."""
     def __init__(self, status_code: int, message: str):
         self.status_code = status_code
         self.message = message
@@ -61,6 +79,11 @@ class UploadValidationError(Exception):
 
 
 def validate_upload(filename: str, content: bytes) -> list[dict]:
+    """Valida y chunkea ANTES de devolver la StreamingResponse.
+    Si fallara dentro del generador, FastAPI ya habría enviado HTTP 200: el error
+    viajaría como evento SSE y un `curl --fail` (como el del seed) no lo vería.
+    Por eso acá se lanzan 400/422 de verdad.
+    """
     filename = filename or "documento.txt"
     if len(content) > MAX_BYTES:
         raise UploadValidationError(400, "El archivo supera los 10 MB")
@@ -79,7 +102,12 @@ def validate_upload(filename: str, content: bytes) -> list[dict]:
 
 
 async def ingest(chunks: list[dict], title: str, filename: str, qdrant, pool, documents: list) -> AsyncGenerator[str, None]:
+    """Indexa emitiendo progreso; la caché `documents` se actualiza al final.
+    Si falla un embedding a mitad, borra los puntos ya insertados y la fila de
+    Postgres: no queremos un documento que parezca indexado pero esté a medias.
+    """
     key = document_key(title)
+    # Re-subir el mismo título no crea otro documento: devuelve el existente.
     existing = next((d for d in documents if document_key(d["title"]) == key), None)
     if existing:
         yield _frame("done", {"doc_id": existing["id"], "title": existing["title"], "chunk_count": existing["chunk_count"]})
@@ -100,6 +128,7 @@ async def ingest(chunks: list[dict], title: str, filename: str, qdrant, pool, do
             qdrant.upsert(
                 collection_name=COLLECTION_NAME,
                 points=[{
+                    # ID estable derivado de (doc_id, chunk_index), no aleatorio.
                     "id": point_id(doc_id, number),
                     "vector": vector,
                     "payload": {
@@ -113,6 +142,8 @@ async def ingest(chunks: list[dict], title: str, filename: str, qdrant, pool, do
             )
             stored.append(point_id(doc_id, number))
             yield _frame("progress", {"phase": "indexing", "processed": number + 1, "total": len(chunks)})
+    # Compensación best-effort: si falla el borrado en Qdrant, al menos no
+    # queda la fila en Postgres.
     except Exception:
         if stored:
             qdrant.delete(collection_name=COLLECTION_NAME, points_selector=stored)
@@ -122,6 +153,7 @@ async def ingest(chunks: list[dict], title: str, filename: str, qdrant, pool, do
 
     await pool.execute("UPDATE documents SET chunk_count = $1 WHERE id = $2", len(chunks), doc_id)
     doc = {"id": doc_id, "title": key, "filename": filename, "source_type": source_type, "chunk_count": len(chunks)}
+    # La numeración [Doc N] se calcula ordenando por id, no por orden de subida.
     documents.append(doc)
     documents.sort(key=lambda d: d["id"])
     yield _frame("done", {"doc_id": doc_id, "title": key, "chunk_count": len(chunks)})
