@@ -82,33 +82,44 @@ export default function App() {
   const onUpload = async (file: File) => {
     setError('')
     setUploadProgress({ processed: 0, total: 0 })
-    const form = new FormData()
-    form.append('file', file)
-    const response = await fetch(`${API}/api/upload`, { method: 'POST', body: form })
-    if (!response.ok) { setError('No se pudo subir el documento'); setUploadProgress(null); return }
-    for await (const event of parseSSE(response)) {
-      if (event.event === 'progress') setUploadProgress({ processed: event.data.processed, total: event.data.total })
-      if (event.event === 'error') setError(event.data.message)
-      if (event.event === 'done') { setUploadProgress(null); await loadDocs() }
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      const response = await fetch(`${API}/api/upload`, { method: 'POST', body: form })
+      if (!response.ok) { setError('No se pudo subir el documento'); return }
+      for await (const event of parseSSE(response)) {
+        if (event.event === 'progress') setUploadProgress({ processed: event.data.processed, total: event.data.total })
+        if (event.event === 'error') setError(event.data.message)
+        if (event.event === 'done') await loadDocs()
+      }
+    } catch {
+      setError('Se perdió la conexión durante la indexación')
+    } finally {
+      setUploadProgress(null)
     }
   }
 
   const onAsk = async () => {
     if (!question.trim()) return
     setAnswer(''); setCitations([]); setError(''); setLoading(true)
-    const response = await fetch(`${API}/api/ask`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
-    })
-    if (!response.ok) { setError('No se pudo hacer la pregunta'); setLoading(false); return }
-    for await (const event of parseSSE(response)) {
-      if (event.event === 'citations') setCitations(event.data.citations)
-      if (event.event === 'token') setAnswer((previous) => previous + event.data.text)
-      if (event.event === 'error') setError(event.data.message)
-      if (event.event === 'done') setAnswer(event.data.text)
+    try {
+      const response = await fetch(`${API}/api/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question }),
+      })
+      if (!response.ok) { setError('No se pudo hacer la pregunta'); return }
+      for await (const event of parseSSE(response)) {
+        if (event.event === 'citations') setCitations(event.data.citations)
+        if (event.event === 'token') setAnswer((previous) => previous + event.data.text)
+        if (event.event === 'error') setError(event.data.message)
+        if (event.event === 'done') setAnswer(event.data.text)
+      }
+    } catch {
+      setError('Se perdió la conexión durante la respuesta')
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   const openCitation = async (n: string) => {
