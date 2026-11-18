@@ -1,0 +1,9 @@
+Apache Kafka: log de eventos distribuido
+
+Apache Kafka es una plataforma de streaming de eventos. Se originó en LinkedIn y se donó a la Apache Software Foundation. Su unidad central es el topic, un log append-only al que los productores escriben registros y del que los consumidores leen.
+
+Los topics se dividen en particiones. Cada partición es una secuencia ordenada de registros con un offset, y se replica entre brokers para tolerar fallos. El orden está garantizado dentro de una partición, no entre particiones.
+
+Los consumidores se organizan en consumer groups. Kafka reparte las particiones entre los miembros de un grupo, de modo que cada registro se entrega a un solo consumidor por grupo. Para leer el mismo evento varias veces con fines distintos, se usan grupos diferentes.
+
+Kafka se usa para desacoplar productores y consumidores, para construir pipelines de datos y como buffer frente a picos de tráfico. Retiene los mensajes durante un periodo configurable, a diferencia de una cola tradicional que los elimina al consumirlos.

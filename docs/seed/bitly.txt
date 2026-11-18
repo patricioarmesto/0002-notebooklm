@@ -1,0 +1,9 @@
+Bitly: acortador de enlaces
+
+Bitly es un servicio que convierte URLs largas en enlaces cortos. Fue lanzado en 2009 y se usa para compartir enlaces en redes sociales, correos y mensajes donde el espacio es limitado.
+
+Cuando una persona hace clic en un enlace de Bitly, el servicio registra el evento y redirige al usuario a la URL original con un código HTTP 301. Ese registro permite contar clics por día, por país y por referente.
+
+Bitly también ofrece enlaces personalizados con un dominio propio y códigos QR. Los enlaces se pueden editar después de creados sin cambiar la dirección corta, aunque la URL destino sí se puede modificar desde el panel.
+
+El caso de uso típico es una campaña de marketing: se genera un enlace corto por canal y se comparan los clics de cada canal para decidir dónde invertir.

@@ -1,0 +1,11 @@
+System Design: principios para diseñar sistemas a escala
+
+Diseñar un sistema a escala empieza por aclarar los requisitos funcionales y no funcionales: qué debe hacer el sistema, cuántos usuarios tendrá, qué latencia acepta y qué disponibilidad exige.
+
+La primera herramienta es estimar. Calcular órdenes de magnitud de tráfico, almacenamiento y ancho de banda permite decidir entre una sola base de datos y una arquitectura con particionamiento. Una estimación burda bien documentada suele ser más útil que una precisión falsa.
+
+El siguiente paso es separar responsabilidades. Un servicio de lectura con caché, una cola para desacoplar escrituras y un almacenamiento de objetos para archivos grandes son patrones recurrentes. Cada componente debe tener un dueño claro de sus datos.
+
+La disponibilidad se logra con replicación y con degradación controlada: ante la falla de una dependencia externa, el sistema debe seguir respondiendo lo esencial. También hay que medir: sin métricas y trazas, un diseño no se puede operar.
+
+Finalmente, todo diseño es un compromiso. Elegir consistencia fuerte puede aumentar la latencia; elegir consistencia eventual simplifica la escala pero obliga a manejar lecturas obsoletas.
