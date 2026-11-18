@@ -4,11 +4,13 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
+
+from upload import ingest
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://notebooklm:notebooklm@localhost:5432/notebooklm")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -142,3 +144,12 @@ def chunk(chunk_id: str):
         "chunk_index": payload["chunk_index"],
         "page": payload["page"],
     }
+
+
+@app.post("/api/upload")
+async def upload_document(file: UploadFile = File(...), title: str = Form("")):
+    name = title.strip() or (file.filename or "documento").rsplit(".", 1)[0]
+    return StreamingResponse(
+        ingest(file, name, app.state.qdrant, app.state.pool, app.state.documents),
+        media_type="text/event-stream",
+    )
