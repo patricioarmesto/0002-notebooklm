@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: notebooklm
       POSTGRES_PASSWORD: notebooklm
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -42,8 +42,7 @@ services:
       ollama:
         condition: service_healthy
     entrypoint: ["/bin/sh", "-c"]
-    command: >
-      ollama pull nomic-embed-text && ollama pull llama3.2:3b
+    command: ["ollama pull nomic-embed-text && ollama pull llama3.2:3b"]
     restart: "no"
 
   backend:
@@ -78,20 +77,21 @@ services:
       backend:
         condition: service_healthy
     entrypoint: ["/bin/sh", "-c"]
-    command: >
-      for f in /seed/*.txt; do
-        echo "Seeding $$f";
-        curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 2
-          -F "file=@$$f;type=text/plain"
-          -F "title=$(basename $$f .txt)"
-          http://backend:8000/api/upload > /dev/null || exit 1;
-      done
+    command:
+      - |
+        for f in /seed/*.txt; do
+          echo "Seeding $$f"
+          curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 2 \
+            -F "file=@$$f;type=text/plain" \
+            -F "title=$$(basename $$f .txt)" \
+            http://backend:8000/api/upload > /dev/null || exit 1
+        done
     restart: "no"
 
   frontend:
     build: ./frontend
     ports:
-      - "5173:5173"
+      - "${FRONTEND_PORT:-5174}:5173"
     environment:
       VITE_API_URL: http://localhost:8000
     depends_on:
