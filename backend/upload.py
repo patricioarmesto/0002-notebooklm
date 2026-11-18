@@ -1,8 +1,8 @@
 import io
 import json
+import os
 from typing import AsyncGenerator
 
-from fastapi import UploadFile
 from pypdf import PdfReader
 
 from search import embed, point_id
@@ -10,6 +10,7 @@ from search import embed, point_id
 CHUNK_SIZE = 500
 OVERLAP = 50
 MAX_BYTES = 10 * 1024 * 1024
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "notebooklm_chunks")
 
 
 def document_key(title: str) -> str:
@@ -52,29 +53,36 @@ def _frame(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def ingest(file: UploadFile, title: str, qdrant, pool, documents: list) -> AsyncGenerator[str, None]:
-    filename = file.filename or "documento.txt"
-    content = await file.read()
-    if len(content) > MAX_BYTES:
-        yield _frame("error", {"message": "El archivo supera los 10 MB"})
-        return
+class UploadValidationError(Exception):
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        self.message = message
+        super().__init__(message)
 
+
+def validate_upload(filename: str, content: bytes) -> list[dict]:
+    filename = filename or "documento.txt"
+    if len(content) > MAX_BYTES:
+        raise UploadValidationError(400, "El archivo supera los 10 MB")
+    if not filename.lower().endswith((".pdf", ".txt")):
+        raise UploadValidationError(400, "Formato no soportado: use PDF o TXT")
+    try:
+        pages = extract_text(filename, content)
+        chunks = []
+        for page_text, page_number in pages:
+            chunks.extend(chunk_text(page_text, page_number))
+    except ValueError as exc:
+        raise UploadValidationError(422, str(exc)) from exc
+    if not chunks:
+        raise UploadValidationError(422, "No se pudo extraer texto del documento")
+    return chunks
+
+
+async def ingest(chunks: list[dict], title: str, filename: str, qdrant, pool, documents: list) -> AsyncGenerator[str, None]:
     key = document_key(title)
     existing = next((d for d in documents if document_key(d["title"]) == key), None)
     if existing:
         yield _frame("done", {"doc_id": existing["id"], "title": existing["title"], "chunk_count": existing["chunk_count"]})
-        return
-
-    try:
-        pages = extract_text(filename, content)
-        all_chunks = []
-        for page_number, page_text in pages:
-            all_chunks.extend(chunk_text(page_text, page_number))
-        if not all_chunks:
-            yield _frame("error", {"message": "No se pudo extraer texto del documento"})
-            return
-    except ValueError as exc:
-        yield _frame("error", {"message": str(exc)})
         return
 
     source_type = "pdf" if filename.lower().endswith(".pdf") else "txt"
@@ -87,10 +95,10 @@ async def ingest(file: UploadFile, title: str, qdrant, pool, documents: list) ->
     doc_id = row["id"]
     stored = []
     try:
-        for number, chunk in enumerate(all_chunks):
+        for number, chunk in enumerate(chunks):
             vector = await embed(chunk["text"])
             qdrant.upsert(
-                collection_name="notebooklm_chunks",
+                collection_name=COLLECTION_NAME,
                 points=[{
                     "id": point_id(doc_id, number),
                     "vector": vector,
@@ -104,16 +112,16 @@ async def ingest(file: UploadFile, title: str, qdrant, pool, documents: list) ->
                 }],
             )
             stored.append(point_id(doc_id, number))
-            yield _frame("progress", {"phase": "indexing", "processed": number + 1, "total": len(all_chunks)})
+            yield _frame("progress", {"phase": "indexing", "processed": number + 1, "total": len(chunks)})
     except Exception:
         if stored:
-            qdrant.delete(collection_name="notebooklm_chunks", points_selector=stored)
+            qdrant.delete(collection_name=COLLECTION_NAME, points_selector=stored)
         await pool.execute("DELETE FROM documents WHERE id = $1", doc_id)
         yield _frame("error", {"message": "Falló la indexación; no se guardó el documento"})
         return
 
-    await pool.execute("UPDATE documents SET chunk_count = $1 WHERE id = $2", len(all_chunks), doc_id)
-    doc = {"id": doc_id, "title": key, "filename": filename, "source_type": source_type, "chunk_count": len(all_chunks)}
+    await pool.execute("UPDATE documents SET chunk_count = $1 WHERE id = $2", len(chunks), doc_id)
+    doc = {"id": doc_id, "title": key, "filename": filename, "source_type": source_type, "chunk_count": len(chunks)}
     documents.append(doc)
     documents.sort(key=lambda d: d["id"])
-    yield _frame("done", {"doc_id": doc_id, "title": key, "chunk_count": len(all_chunks)})
+    yield _frame("done", {"doc_id": doc_id, "title": key, "chunk_count": len(chunks)})

@@ -10,8 +10,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
+import upload
 from answer import answer_question
-from upload import ingest
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://notebooklm:notebooklm@localhost:5432/notebooklm")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -149,9 +149,15 @@ def chunk(chunk_id: str):
 
 @app.post("/api/upload")
 async def upload_document(file: UploadFile = File(...), title: str = Form("")):
-    name = title.strip() or (file.filename or "documento").rsplit(".", 1)[0]
+    filename = file.filename or "documento.txt"
+    content = await file.read()
+    try:
+        chunks = upload.validate_upload(filename, content)
+    except upload.UploadValidationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    name = title.strip() or filename.rsplit(".", 1)[0]
     return StreamingResponse(
-        ingest(file, name, app.state.qdrant, app.state.pool, app.state.documents),
+        upload.ingest(chunks, name, filename, app.state.qdrant, app.state.pool, app.state.documents),
         media_type="text/event-stream",
     )
 
@@ -159,6 +165,8 @@ async def upload_document(file: UploadFile = File(...), title: str = Form("")):
 @app.post("/api/ask")
 async def ask(payload: dict):
     question = payload.get("question", "")
+    if not question.strip():
+        raise HTTPException(status_code=400, detail="La pregunta no puede estar vacía")
     return StreamingResponse(
         answer_question(question, app.state.qdrant, app.state.pool, app.state.documents, app.state.llm_model),
         media_type="text/event-stream",

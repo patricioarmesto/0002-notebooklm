@@ -43,3 +43,22 @@ def test_ready_reports_missing_models():
     response = client.get("/api/ready")
     assert response.status_code == 503
     assert response.json()["missing"] == ["model:nomic-embed-text"]
+
+
+def test_upload_bad_extension_returns_400():
+    client = TestClient(main.app)
+    response = client.post("/api/upload", files={"file": ("notas.md", b"hola", "text/markdown")})
+    assert response.status_code == 400
+
+
+def test_upload_pdf_without_text_returns_422(monkeypatch):
+    monkeypatch.setattr(main.upload, "extract_text", lambda filename, content: [])
+    client = TestClient(main.app)
+    response = client.post("/api/upload", files={"file": ("vacio.pdf", b"%PDF-fake", "application/pdf")})
+    assert response.status_code == 422
+
+
+def test_ask_empty_question_returns_400():
+    client = TestClient(main.app)
+    response = client.post("/api/ask", json={"question": "   "})
+    assert response.status_code == 400

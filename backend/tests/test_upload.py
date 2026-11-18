@@ -32,3 +32,55 @@ def test_extract_pdf_without_text_raises(monkeypatch):
 
 def test_document_key_is_normalized():
     assert upload.document_key("  Bitly  ") == upload.document_key("bitly")
+
+
+def test_validate_upload_rejects_bad_extension_with_400():
+    with pytest.raises(upload.UploadValidationError) as exc:
+        upload.validate_upload("notas.md", b"hola")
+    assert exc.value.status_code == 400
+
+
+def test_validate_upload_rejects_oversized_file_with_400():
+    with pytest.raises(upload.UploadValidationError) as exc:
+        upload.validate_upload("notas.txt", b"x" * (upload.MAX_BYTES + 1))
+    assert exc.value.status_code == 400
+
+
+def test_validate_upload_rejects_pdf_without_text_with_422(monkeypatch):
+    monkeypatch.setattr(upload, "extract_text", lambda filename, content: [])
+    with pytest.raises(upload.UploadValidationError) as exc:
+        upload.validate_upload("vacio.pdf", b"%PDF-fake")
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_ingest_indexes_text_with_page_one(monkeypatch):
+    class FakeQdrant:
+        def __init__(self):
+            self.points = []
+            self.collections = []
+
+        def upsert(self, collection_name, points):
+            self.collections.append(collection_name)
+            self.points.extend(points)
+
+    class FakePool:
+        async def fetchrow(self, query, *args):
+            return {"id": 1, "title": "notas"}
+
+        async def execute(self, query, *args):
+            return None
+
+    async def fake_embed(text):
+        return [0.0] * 768
+
+    monkeypatch.setattr(upload, "embed", fake_embed)
+    monkeypatch.setattr(upload, "COLLECTION_NAME", "otra_coleccion")
+    qdrant = FakeQdrant()
+    documents = []
+    chunks = upload.validate_upload("notas.txt", b"hola mundo")
+    events = [event async for event in upload.ingest(chunks, "notas", "notas.txt", qdrant, FakePool(), documents)]
+    assert any("event: done" in event for event in events)
+    assert qdrant.collections == ["otra_coleccion"]
+    assert qdrant.points[0]["payload"]["page"] == 1
+    assert documents[0]["chunk_count"] == 1
