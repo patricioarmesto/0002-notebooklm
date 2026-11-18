@@ -13,6 +13,58 @@ CHUNKS = [
 ]
 
 
+def fake_client_for(lines):
+    class FakeResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            for line in lines:
+                yield line
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeResponse()
+
+    return FakeClient
+
+
+class RecordingPool:
+    def __init__(self):
+        self.deleted = []
+        self.answer_inserts = []
+
+    async def fetchrow(self, query, *args):
+        if "INSERT INTO questions" in query:
+            return {"id": 7}
+        if "INSERT INTO answers" in query:
+            self.answer_inserts.append(args)
+            return {"id": 8}
+        raise AssertionError(f"consulta inesperada: {query}")
+
+    async def execute(self, query, *args):
+        self.deleted.append(args)
+
+
+async def fake_retrieve(question, qdrant, limit=4):
+    return CHUNKS
+
+
 def test_build_context_numbers_docs_by_postgres_id():
     context, citations = answer.build_context(CHUNKS, DOCS)
     assert "[Doc 3]" in context
@@ -22,6 +74,21 @@ def test_build_context_numbers_docs_by_postgres_id():
     assert citations[0]["chunk_id"] == "u3"
     assert citations[1]["n"] == 1
     assert citations[1]["chunk_id"] == "u1"
+
+
+def test_build_context_uses_postgres_id_when_ids_have_gaps():
+    docs = [
+        {"id": 1, "title": "bitly"},
+        {"id": 3, "title": "kafka"},
+        {"id": 5, "title": "system-design"},
+    ]
+    chunks = [
+        {"doc_id": 5, "doc_title": "system-design", "text": "Diseño de sistemas.", "page": 1, "chunk_index": 0, "id": "u5"},
+    ]
+    context, citations = answer.build_context(chunks, docs)
+    assert "[Doc 5]" in context
+    assert citations[0]["n"] == 5
+    assert citations[0]["doc_id"] == 5
 
 
 def test_build_prompt_contains_unknown_rule():
@@ -44,61 +111,48 @@ def test_accumulate_answer_is_all_or_nothing():
     assert answer.accumulate_answer([]) == ""
 
 
-def test_ensure_citations_adds_top_citation_only_when_model_omits_it():
-    citations = [{"n": 1}, {"n": 2}]
-    assert answer.ensure_citations("Una ventaja es el ahorro de espacio.", citations) == "Una ventaja es el ahorro de espacio. [Doc 1]"
-    assert answer.ensure_citations("Según [Doc 2] ...", citations) == "Según [Doc 2] ..."
-    unknown = "No lo sé con los documentos disponibles."
-    assert answer.ensure_citations(unknown, citations) == unknown
-    uncertain = "No tengo información suficiente en los documentos."
-    assert answer.ensure_citations(uncertain, citations) == uncertain
-    assert answer.ensure_citations("texto", []) == "texto"
+@pytest.mark.asyncio
+async def test_answer_question_rejects_uncited_answer(monkeypatch):
+    lines = ['{"response":"Una respuesta sin cita"}', '{"done":true}']
+    monkeypatch.setattr(answer.httpx, "AsyncClient", fake_client_for(lines))
+    monkeypatch.setattr(answer, "retrieve", fake_retrieve)
+    pool = RecordingPool()
+    events = [event async for event in answer.answer_question("q", object(), pool, DOCS, "model")]
+    assert any(event.startswith("event: error") and "citas" in event for event in events)
+    assert not any(event.startswith("event: done") for event in events)
+    assert pool.deleted == [(7,)]
+    assert pool.answer_inserts == []
 
 
 @pytest.mark.asyncio
-async def test_answer_question_streams_fallback_citation(monkeypatch):
-    class FakeResponse:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        def raise_for_status(self):
-            return None
-
-        async def aiter_lines(self):
-            yield '{"response":"Una respuesta sin cita"}'
-            yield '{"done":true}'
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        def stream(self, *args, **kwargs):
-            return FakeResponse()
-
-    class FakePool:
-        async def fetchrow(self, query, *args):
-            return {"id": 7}
-
-        async def execute(self, query, *args):
-            return None
-
-    async def fake_retrieve(question, qdrant, limit=4):
-        return CHUNKS
-
-    monkeypatch.setattr(answer.httpx, "AsyncClient", FakeClient)
+async def test_answer_question_keeps_uncertainty_without_citation(monkeypatch):
+    lines = ['{"response":"No lo sé con los documentos disponibles."}', '{"done":true}']
+    monkeypatch.setattr(answer.httpx, "AsyncClient", fake_client_for(lines))
     monkeypatch.setattr(answer, "retrieve", fake_retrieve)
-    events = [event async for event in answer.answer_question("q", object(), FakePool(), DOCS, "model")]
-    assert any(event.startswith("event: token") and "[Doc 3]" in event for event in events)
-    assert any("[Doc 3]" in event and "event: done" in event for event in events)
+    pool = RecordingPool()
+    events = [event async for event in answer.answer_question("q", object(), pool, DOCS, "model")]
+    done = [event for event in events if event.startswith("event: done")]
+    assert not any(event.startswith("event: error") for event in events)
+    assert len(done) == 1
+    assert "No lo sé con los documentos disponibles." in done[0]
+    assert "[Doc " not in done[0]
+    assert pool.deleted == []
+    assert len(pool.answer_inserts) == 1
+
+
+@pytest.mark.asyncio
+async def test_answer_question_keeps_cited_answer(monkeypatch):
+    lines = ['{"response":"Según [Doc 3] los datos..."}', '{"done":true}']
+    monkeypatch.setattr(answer.httpx, "AsyncClient", fake_client_for(lines))
+    monkeypatch.setattr(answer, "retrieve", fake_retrieve)
+    pool = RecordingPool()
+    events = [event async for event in answer.answer_question("q", object(), pool, DOCS, "model")]
+    done = [event for event in events if event.startswith("event: done")]
+    assert not any(event.startswith("event: error") for event in events)
+    assert len(done) == 1
+    assert "[Doc 3]" in done[0]
+    assert pool.deleted == []
+    assert len(pool.answer_inserts) == 1
 
 
 @pytest.mark.asyncio

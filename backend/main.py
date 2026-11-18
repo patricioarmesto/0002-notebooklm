@@ -71,6 +71,11 @@ async def httpx_get(url, timeout):
         return await client.get(url, timeout=timeout)
 
 
+def model_reference(name: str) -> str:
+    """Ollama informa `name:latest` cuando el pull no especificó tag."""
+    return name if ":" in name else f"{name}:latest"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Arranque: crea esquema y colección, y cachea los documentos en memoria.
@@ -134,9 +139,9 @@ async def ready():
     try:
         response = await httpx_get(f"{OLLAMA_HOST}/api/tags", timeout=10)
         response.raise_for_status()
-        installed = {m["name"].split(":")[0] for m in response.json().get("models", [])}
+        installed = {model_reference(m["name"]) for m in response.json().get("models", [])}
         for model in (LLM_MODEL, EMBED_MODEL):
-            if model.split(":")[0] not in installed:
+            if model_reference(model) not in installed:
                 missing.append(f"model:{model}")
     except Exception:
         missing.extend(["ollama", f"model:{LLM_MODEL}", f"model:{EMBED_MODEL}"])

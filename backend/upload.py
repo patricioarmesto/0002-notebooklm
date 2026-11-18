@@ -6,12 +6,12 @@ pregunta se compara contra esos fragmentos, no contra el archivo completo.
 """
 
 import io
-import json
 import os
 from typing import AsyncGenerator
 
 from pypdf import PdfReader
 
+from events import sse_frame
 from search import embed, point_id
 
 # Fragmentos de 500 caracteres con 50 de solapamiento: los muy grandes
@@ -65,11 +65,6 @@ def chunk_text(text: str, page: int) -> list[dict]:
     return chunks
 
 
-def _frame(event: str, data: dict) -> str:
-    """Un evento SSE: línea `event`, línea `data` y línea en blanco de cierre."""
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
 class UploadValidationError(Exception):
     """Lleva el código HTTP porque la validación ocurre antes del streaming."""
     def __init__(self, status_code: int, message: str):
@@ -110,7 +105,7 @@ async def ingest(chunks: list[dict], title: str, filename: str, qdrant, pool, do
     # Re-subir el mismo título no crea otro documento: devuelve el existente.
     existing = next((d for d in documents if document_key(d["title"]) == key), None)
     if existing:
-        yield _frame("done", {"doc_id": existing["id"], "title": existing["title"], "chunk_count": existing["chunk_count"]})
+        yield sse_frame("done", {"doc_id": existing["id"], "title": existing["title"], "chunk_count": existing["chunk_count"]})
         return
 
     source_type = "pdf" if filename.lower().endswith(".pdf") else "txt"
@@ -141,14 +136,14 @@ async def ingest(chunks: list[dict], title: str, filename: str, qdrant, pool, do
                 }],
             )
             stored.append(point_id(doc_id, number))
-            yield _frame("progress", {"phase": "indexing", "processed": number + 1, "total": len(chunks)})
+            yield sse_frame("progress", {"phase": "indexing", "processed": number + 1, "total": len(chunks)})
     # Compensación best-effort: si falla el borrado en Qdrant, al menos no
     # queda la fila en Postgres.
     except Exception:
         if stored:
             qdrant.delete(collection_name=COLLECTION_NAME, points_selector=stored)
         await pool.execute("DELETE FROM documents WHERE id = $1", doc_id)
-        yield _frame("error", {"message": "Falló la indexación; no se guardó el documento"})
+        yield sse_frame("error", {"message": "Falló la indexación; no se guardó el documento"})
         return
 
     await pool.execute("UPDATE documents SET chunk_count = $1 WHERE id = $2", len(chunks), doc_id)
@@ -156,4 +151,4 @@ async def ingest(chunks: list[dict], title: str, filename: str, qdrant, pool, do
     # La numeración [Doc N] se calcula ordenando por id, no por orden de subida.
     documents.append(doc)
     documents.sort(key=lambda d: d["id"])
-    yield _frame("done", {"doc_id": doc_id, "title": key, "chunk_count": len(chunks)})
+    yield sse_frame("done", {"doc_id": doc_id, "title": key, "chunk_count": len(chunks)})
