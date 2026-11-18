@@ -11,17 +11,17 @@ type Token = { kind: 'text' | 'citation'; value: string }
 
 /**
  * Convierte los [Doc N] de la respuesta en tokens clicables.
- * Los números que no están en `known` quedan como texto: no queremos
- * botones que no puedan abrir un chunk real.
+ * Los números que no están en `knownDocumentNumbers` quedan como texto: no
+ * queremos botones que no puedan abrir un chunk real.
  */
-export function splitAnswerText(text: string, known: number[] = []): Token[] {
+export function splitAnswerText(text: string, knownDocumentNumbers: number[] = []): Token[] {
   const result: Token[] = []
   const regex = /\[Doc (\d+)\]/g
   let last = 0
   let match: RegExpExecArray | null
   while ((match = regex.exec(text)) !== null) {
     const number = Number(match[1])
-    if (known.length > 0 && !known.includes(number)) continue
+    if (knownDocumentNumbers.length > 0 && !knownDocumentNumbers.includes(number)) continue
     if (match.index > last) result.push({ kind: 'text', value: text.slice(last, match.index) })
     result.push({ kind: 'citation', value: match[1] })
     last = match.index + match[0].length
@@ -55,6 +55,24 @@ export async function* parseSSE(response: Response): AsyncGenerator<{ event: str
       }
       if (dataLines.length) yield { event, data: JSON.parse(dataLines.join('\n')) }
     }
+  }
+}
+
+type SSEHandlers = Record<string, (data: any) => void | Promise<void>>
+
+/**
+ * Despacha cada evento del stream a su handler. Devuelve false si la conexión
+ * se cortó, para que cada pantalla muestre su propio mensaje de error.
+ */
+export async function consumeSSE(response: Response, handlers: SSEHandlers): Promise<boolean> {
+  try {
+    for await (const event of parseSSE(response)) {
+      const handler = handlers[event.event]
+      if (handler) await handler(event.data)
+    }
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -101,13 +119,12 @@ export default function App() {
       form.append('file', file)
       const response = await fetch(`${API}/api/upload`, { method: 'POST', body: form })
       if (!response.ok) { setError('No se pudo subir el documento'); return }
-      for await (const event of parseSSE(response)) {
-        if (event.event === 'progress') setUploadProgress({ processed: event.data.processed, total: event.data.total })
-        if (event.event === 'error') setError(event.data.message)
-        if (event.event === 'done') await loadDocs()
-      }
-    } catch {
-      setError('Se perdió la conexión durante la indexación')
+      const completed = await consumeSSE(response, {
+        progress: (data) => setUploadProgress({ processed: data.processed, total: data.total }),
+        error: (data) => setError(data.message),
+        done: async () => { await loadDocs() },
+      })
+      if (!completed) setError('Se perdió la conexión durante la indexación')
     } finally {
       setUploadProgress(null)
     }
@@ -123,23 +140,22 @@ export default function App() {
         body: JSON.stringify({ question }),
       })
       if (!response.ok) { setError('No se pudo hacer la pregunta'); return }
-      for await (const event of parseSSE(response)) {
-        // `citations` llega primero; `token` se acumula y `done` fija el texto final.
-        if (event.event === 'citations') setCitations(event.data.citations)
-        if (event.event === 'token') setAnswer((previous) => previous + event.data.text)
-        if (event.event === 'error') setError(event.data.message)
-        if (event.event === 'done') setAnswer(event.data.text)
-      }
-    } catch {
-      setError('Se perdió la conexión durante la respuesta')
+      // `citations` llega primero; `token` se acumula y `done` fija el texto final.
+      const completed = await consumeSSE(response, {
+        citations: (data) => setCitations(data.citations),
+        token: (data) => setAnswer((previous) => previous + data.text),
+        error: (data) => setError(data.message),
+        done: (data) => setAnswer(data.text),
+      })
+      if (!completed) setError('Se perdió la conexión durante la respuesta')
     } finally {
       setLoading(false)
     }
   }
 
   // El botón [Doc N] no guarda el texto: lo busca en Qdrant vía el backend.
-  const openCitation = async (n: string) => {
-    const citation = citations.find((c) => String(c.n) === n)
+  const openCitation = async (documentNumber: string) => {
+    const citation = citations.find((c) => String(c.n) === documentNumber)
     if (!citation) return
     const response = await fetch(`${API}/api/chunks/${citation.chunk_id}`)
     if (response.ok) setActiveChunk(await response.json())
