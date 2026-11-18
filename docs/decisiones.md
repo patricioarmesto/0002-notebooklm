@@ -33,6 +33,8 @@ Servicios de `docker-compose.yml`:
 | `seed-docs` | one-shot con `curl`, sube `docs/seed/*.txt` al endpoint real de upload |
 | `frontend` | Node 20 + Vite dev server, puerto 5173 |
 
+Los puertos indicados son los internos de la red de Compose. En el host, `POSTGRES_PORT` y `FRONTEND_PORT` default a `5433` y `5174` para no chocar con otros proyectos que ya ocupan `5432` y `5173`; se pueden override con variables de entorno. `backend` (8000), Qdrant (6333) y Ollama (11434) conservan su mapeo.
+
 `model-pull` termina con éxito antes de que arranque `backend` (`depends_on: service_completed_successfully`). `seed-docs` depende de `backend` y termina antes de que arranque `frontend`. Orden real: infraestructura → modelos → backend → semillas → frontend. El frontend espera a `GET /api/ready`.
 
 ### Estructura de archivos
