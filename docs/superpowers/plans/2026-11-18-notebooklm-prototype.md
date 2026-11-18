@@ -714,7 +714,7 @@ git commit -m "feat: add Ollama embeddings and Qdrant retrieval"
 
 **Interfaces:**
 - Consumes: `search.embed`, `search.point_id`, `app.state.pool`, `app.state.qdrant`, `app.state.documents`.
-- Produces: `extract_text(filename: str, content: bytes) -> list[tuple[str, int]]`, `chunk_text(text: str, page: int) -> list[dict]`, `document_key(title: str) -> str`, `ingest(file, title, qdrant, pool, documents) -> AsyncGenerator[str, None]` yielding SSE frames.
+- Produces: `extract_text(filename: str, content: bytes) -> list[tuple[str, int]]`, `chunk_text(text: str, page: int) -> list[dict]`, `document_key(title: str) -> str`, `ingest(chunks, title, filename, qdrant, pool, documents) -> AsyncGenerator[str, None]` yielding SSE frames via `events.sse_frame`.
 
 - [x] **Step 1: Write the failing tests**
 
@@ -929,7 +929,7 @@ git commit -m "feat: add upload pipeline with chunking, embeddings and SSE progr
 
 **Interfaces:**
 - Consumes: `search.retrieve`, `app.state.documents`, `app.state.pool`, `app.state.qdrant`, LLM/embed model names.
-- Produces: `build_context(chunks, documents) -> tuple[str, list[dict]]`, `build_prompt(context: str) -> str`, `accumulate_answer(tokens: list[str]) -> str`, `answer_question(question, qdrant, pool, documents, llm_model) -> AsyncGenerator[str, None]`.
+- Produces: `build_context(chunks, documents) -> tuple[str, list[dict]]`, `build_prompt(context: str, question: str = "") -> str`, `accumulate_answer(tokens: list[str]) -> str`, `has_citation_or_uncertainty(text: str) -> bool`, `answer_question(question, qdrant, pool, documents, llm_model) -> AsyncGenerator[str, None]`. SSE frames come from `events.sse_frame`.
 
 - [x] **Step 1: Write the failing tests**
 
@@ -1189,7 +1189,7 @@ git commit -m "feat: add cited answer generation with SSE streaming"
 
 **Interfaces:**
 - Consumes: `GET /api/documents`, `GET /api/ready`, `POST /api/upload` (SSE), `POST /api/ask` (SSE), `GET /api/chunks/{id}`.
-- Produces: `splitAnswerText(text: string): Array<{kind:'text'|'citation', value:string}>`, `parseSSE(response: Response): AsyncGenerator<{event:string,data:any}>`, and the `App` default export.
+- Produces: `splitAnswerText(text: string, knownDocumentNumbers: number[] = []): Array<{kind:'text'|'citation', value:string}>`, `parseSSE(response: Response): AsyncGenerator<{event:string,data:any}>`, `consumeSSE(response: Response, handlers: Record<string, (data:any) => void|Promise<void>>): Promise<boolean>`, and the `App` default export.
 
 - [x] **Step 1: Write the failing test**
 
@@ -1475,7 +1475,7 @@ Prototipo funcional de NotebookLM: subís PDF o TXT, el sistema los indexa y des
 docker compose up
 ```
 
-El primer arranque descarga `llama3.2:3b` y `nomic-embed-text` (puede tardar varios minutos). Después abrí http://localhost:5173. No hace falta configurar nada ni usar APIs pagas.
+El primer arranque descarga `llama3.2:3b` y `nomic-embed-text` (puede tardar varios minutos). Después abrí http://localhost:5174. No hace falta configurar nada ni usar APIs pagas.
 
 Si querés ver el progreso: `docker compose logs -f model-pull seed-docs`.
 
